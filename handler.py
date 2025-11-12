@@ -258,6 +258,268 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     return banned_assignments
 
 
+def _format_notification_message(assignment: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Format an assignment into a structured notification message.
+    
+    Args:
+        assignment: Assignment dictionary from Samsara API.
+        
+    Returns:
+        Formatted notification payload.
+    """
+    driver = assignment.get("driver", {})
+    vehicle = assignment.get("vehicle", {})
+    start_time = assignment.get("startTime")
+    end_time = assignment.get("endTime")
+    
+    return {
+        "event_type": "banned_driver_assignment",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "driver": {
+            "id": driver.get("id"),
+            "name": driver.get("name", "Unknown"),
+            "username": driver.get("username"),
+        },
+        "vehicle": {
+            "id": vehicle.get("id"),
+            "name": vehicle.get("name", "Unknown"),
+            "vin": vehicle.get("vin"),
+        },
+        "assignment": {
+            "id": assignment.get("id"),
+            "start_time": start_time,
+            "end_time": end_time,
+            "assignment_type": assignment.get("assignmentType"),
+        },
+        "message": (
+            f"⚠️ ALERT: Banned driver {driver.get('name', 'Unknown')} "
+            f"(ID: {driver.get('id', 'N/A')}) was assigned to "
+            f"Vehicle {vehicle.get('name', 'Unknown')} "
+            f"(ID: {vehicle.get('id', 'N/A')})"
+        ),
+    }
+
+
+def _send_webhook_notification(
+    webhook_url: str,
+    payload: Dict[str, Any],
+    timeout: int = 10,
+    headers: Optional[Dict[str, str]] = None,
+) -> bool:
+    """
+    Send a webhook notification to the specified URL.
+    
+    Args:
+        webhook_url: The webhook endpoint URL to send the notification to.
+        payload: The notification payload to send.
+        timeout: Request timeout in seconds.
+        headers: Optional custom headers. If not provided, defaults to JSON content-type.
+        
+    Returns:
+        True if the notification was sent successfully, False otherwise.
+    """
+    if not webhook_url:
+        return False
+    
+    default_headers = {
+        "Content-Type": "application/json",
+    }
+    if headers:
+        default_headers.update(headers)
+    
+    try:
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers=default_headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to send webhook notification to {webhook_url}: {str(e)}")
+        return False
+
+
+def _send_slack_notification(webhook_url: str, assignment: Dict[str, Any]) -> bool:
+    """
+    Send a notification formatted for Slack's Incoming Webhook format.
+    
+    Args:
+        webhook_url: Slack webhook URL.
+        assignment: Assignment dictionary from Samsara API.
+        
+    Returns:
+        True if notification was sent successfully, False otherwise.
+    """
+    notification = _format_notification_message(assignment)
+    driver = assignment.get("driver", {})
+    vehicle = assignment.get("vehicle", {})
+    
+    # Format Slack message
+    slack_payload = {
+        "text": "🚨 Banned Driver Alert",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "🚨 Banned Driver Alert",
+                    "emoji": True,
+                },
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Driver:*\n{driver.get('name', 'Unknown')}\n`{driver.get('id', 'N/A')}`",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Vehicle:*\n{vehicle.get('name', 'Unknown')}\n`{vehicle.get('id', 'N/A')}`",
+                    },
+                ],
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": notification["message"],
+                },
+            },
+        ],
+    }
+    
+    return _send_webhook_notification(webhook_url, slack_payload)
+
+
+def _send_teams_notification(webhook_url: str, assignment: Dict[str, Any]) -> bool:
+    """
+    Send a notification formatted for Microsoft Teams webhook format.
+    
+    Args:
+        webhook_url: Teams webhook URL.
+        assignment: Assignment dictionary from Samsara API.
+        
+    Returns:
+        True if notification was sent successfully, False otherwise.
+    """
+    notification = _format_notification_message(assignment)
+    driver = assignment.get("driver", {})
+    vehicle = assignment.get("vehicle", {})
+    
+    # Format Teams message
+    teams_payload = {
+        "@type": "MessageCard",
+        "@context": "https://schema.org/extensions",
+        "summary": "Banned Driver Alert",
+        "themeColor": "FF0000",
+        "title": "🚨 Banned Driver Alert",
+        "sections": [
+            {
+                "activityTitle": notification["message"],
+                "facts": [
+                    {
+                        "name": "Driver",
+                        "value": f"{driver.get('name', 'Unknown')} (ID: {driver.get('id', 'N/A')})",
+                    },
+                    {
+                        "name": "Vehicle",
+                        "value": f"{vehicle.get('name', 'Unknown')} (ID: {vehicle.get('id', 'N/A')})",
+                    },
+                    {
+                        "name": "Time",
+                        "value": notification["timestamp"],
+                    },
+                ],
+                "markdown": True,
+            }
+        ],
+    }
+    
+    return _send_webhook_notification(webhook_url, teams_payload)
+
+
+def notify_banned_driver_assignments(
+    assignments: List[Dict[str, Any]],
+    webhook_url: Optional[str] = None,
+    webhook_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Send notifications for banned driver assignments via webhook.
+    
+    Args:
+        assignments: List of banned driver assignments to notify about.
+        webhook_url: The webhook URL to send notifications to. If None, reads from secrets.
+        webhook_type: Type of webhook ('slack', 'teams', or 'generic'). Auto-detects if None.
+        
+    Returns:
+        Dictionary with notification results.
+    """
+    if not assignments:
+        return {"sent": 0, "failed": 0, "results": []}
+    
+    # Get webhook URL from secrets if not provided
+    if not webhook_url:
+        function = samsara.Function()
+        secrets = function.secrets().load()
+        webhook_url = secrets.get("BANNED_DRIVER_WEBHOOK_URL")
+        webhook_type = webhook_type or secrets.get("BANNED_DRIVER_WEBHOOK_TYPE", "generic")
+    
+    if not webhook_url:
+        print("No webhook URL configured. Skipping notifications.")
+        return {"sent": 0, "failed": len(assignments), "results": []}
+    
+    # Auto-detect webhook type from URL if not specified
+    if not webhook_type:
+        url_lower = webhook_url.lower()
+        if "slack.com" in url_lower or "hooks.slack.com" in url_lower:
+            webhook_type = "slack"
+        elif "office.com" in url_lower or "office365.com" in url_lower:
+            webhook_type = "teams"
+        else:
+            webhook_type = "generic"
+    
+    results = []
+    sent_count = 0
+    failed_count = 0
+    
+    for assignment in assignments:
+        notification = _format_notification_message(assignment)
+        
+        # Send notification based on webhook type
+        if webhook_type.lower() == "slack":
+            success = _send_slack_notification(webhook_url, assignment)
+        elif webhook_type.lower() == "teams":
+            success = _send_teams_notification(webhook_url, assignment)
+        else:  # generic
+            success = _send_webhook_notification(webhook_url, notification)
+        
+        result = {
+            "assignment_id": assignment.get("id"),
+            "driver_id": assignment.get("driver", {}).get("id"),
+            "vehicle_id": assignment.get("vehicle", {}).get("id"),
+            "sent": success,
+        }
+        results.append(result)
+        
+        if success:
+            sent_count += 1
+            print(f"✓ Notification sent for assignment {assignment.get('id')}")
+        else:
+            failed_count += 1
+            print(f"✗ Failed to send notification for assignment {assignment.get('id')}")
+    
+    return {
+        "sent": sent_count,
+        "failed": failed_count,
+        "total": len(assignments),
+        "results": results,
+    }
+
+
 def print_current_driver_vehicle_assignments():
     """
     For each vehicle, fetch current HOS driver-vehicle assignments and print the mapping.
@@ -427,15 +689,18 @@ def detect_banned_driver_assignments_handler(event, context):
     Lambda handler wrapping detect_banned_driver_assignments.
 
     Args:
-        event: Invocation payload; supports optional 'hours' override.
+        event: Invocation payload; supports optional 'hours' override and 'send_notifications' flag.
         context: Lambda context (unused).
 
     Returns:
-        Response containing banned driver assignments within the window.
+        Response containing banned driver assignments within the window and notification results.
     """
     hours_override = None
+    send_notifications = True
+    
     if isinstance(event, dict):
         hours_override = event.get("hours")
+        send_notifications = event.get("send_notifications", True)
 
     if isinstance(hours_override, (int, float)) and hours_override > 0:
         lookback_hours = int(hours_override)
@@ -443,16 +708,23 @@ def detect_banned_driver_assignments_handler(event, context):
         lookback_hours = 2
 
     assignments = detect_banned_driver_assignments(hours=lookback_hours)
+    
+    notification_results = None
+    if send_notifications and assignments:
+        notification_results = notify_banned_driver_assignments(assignments)
+
+    response_body = {
+        "hours": lookback_hours,
+        "count": len(assignments),
+        "assignments": assignments,
+    }
+    
+    if notification_results:
+        response_body["notifications"] = notification_results
 
     return {
         "statusCode": 200,
-        "body": json.dumps(
-            {
-                "hours": lookback_hours,
-                "count": len(assignments),
-                "assignments": assignments,
-            }
-        ),
+        "body": json.dumps(response_body),
     }
 
 if __name__ == "__main__":
@@ -463,14 +735,41 @@ if __name__ == "__main__":
         signout_currently_assigned_drivers()
     elif len(sys.argv) > 1 and sys.argv[1] == "detect-banned":
         hours_arg = 2
+        send_notifications = True
+        
+        # Parse arguments
         if len(sys.argv) > 2:
-            try:
-                hours_arg = int(sys.argv[2])
-            except ValueError:
-                print(f"Invalid hours value '{sys.argv[2]}'. Defaulting to 2 hours.")
-        detect_banned_driver_assignments(hours=hours_arg)
+            for arg in sys.argv[2:]:
+                if arg.startswith("--hours="):
+                    try:
+                        hours_arg = int(arg.split("=")[1])
+                    except ValueError:
+                        print(f"Invalid hours value. Defaulting to 2 hours.")
+                elif arg == "--no-notifications":
+                    send_notifications = False
+                elif arg.isdigit():
+                    # Backward compatibility: if it's just a number, treat as hours
+                    try:
+                        hours_arg = int(arg)
+                    except ValueError:
+                        pass
+        
+        assignments = detect_banned_driver_assignments(hours=hours_arg)
+        
+        if send_notifications and assignments:
+            print("\n" + "="*60)
+            print("Sending notifications...")
+            print("="*60)
+            notification_results = notify_banned_driver_assignments(assignments)
+            print(f"\nNotification Summary: {notification_results['sent']} sent, {notification_results['failed']} failed")
     else:
         print("Usage:")
         print("  python handler.py assignments   # Print current driver-vehicle assignments")
         print("  python handler.py signout       # Sign out all currently assigned drivers")
-        print("  python handler.py detect-banned [hours]  # Detect banned driver assignments within the past N hours")
+        print("  python handler.py detect-banned [--hours=N] [--no-notifications]")
+        print("                                   # Detect banned driver assignments and send notifications")
+        print("")
+        print("Examples:")
+        print("  python handler.py detect-banned                    # Check last 2 hours, send notifications")
+        print("  python handler.py detect-banned --hours=4          # Check last 4 hours, send notifications")
+        print("  python handler.py detect-banned --no-notifications # Check but don't send notifications")
