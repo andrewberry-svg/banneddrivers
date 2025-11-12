@@ -375,6 +375,9 @@ def _submit_banned_driver_documents(
     api_token: str,
     base_url: str,
 ) -> None:
+    if not assignments:
+        return
+    
     document_type_id = document_config.get("document_type_id")
     driver_field_id = document_config.get("driver_name_field_id")
     vehicle_field_id = document_config.get("vehicle_name_field_id")
