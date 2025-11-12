@@ -344,10 +344,8 @@ def _send_banned_driver_alert_webhooks(
 ) -> None:
     urls = webhook_config.get("urls") or []
     if not urls:
-        print("Banned driver webhook dispatch skipped: no destinations configured.")
         return
     if not assignments:
-        print("Banned driver webhook dispatch skipped: no assignments to report.")
         return
 
     headers = webhook_config.get("headers") or {}
@@ -369,6 +367,92 @@ def _send_banned_driver_alert_webhooks(
                 )
         except requests.exceptions.RequestException as exc:
             print(f"Failed to deliver banned driver webhook to {url}: {exc}")
+
+
+def _submit_banned_driver_documents(
+    assignments: List[Dict[str, Any]],
+    document_config: Dict[str, Any],
+    api_token: str,
+    base_url: str,
+) -> None:
+    document_type_id = document_config.get("document_type_id")
+    driver_field_id = document_config.get("driver_name_field_id")
+    vehicle_field_id = document_config.get("vehicle_name_field_id")
+    assignment_time_field_id = document_config.get("assignment_time_field_id")
+
+    if not document_type_id:
+        print("Banned driver document submission skipped: document type not configured.")
+        return
+
+    missing_fields = [
+        field_name
+        for field_name, value in {
+            "BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID": driver_field_id,
+            "BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID": vehicle_field_id,
+            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID": assignment_time_field_id,
+        }.items()
+        if not value
+    ]
+    if missing_fields:
+        print(
+            "Banned driver document submission skipped: missing field IDs "
+            f"{', '.join(missing_fields)}."
+        )
+        return
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_token}",
+    }
+
+    for assignment in assignments:
+        driver = assignment.get("driver") or {}
+        vehicle = assignment.get("vehicle") or {}
+
+        document_fields: List[Dict[str, Any]] = [
+            {
+                "documentFieldId": driver_field_id,
+                "stringValue": driver.get("name") or "Unknown driver",
+            },
+            {
+                "documentFieldId": vehicle_field_id,
+                "stringValue": vehicle.get("name") or "Unknown vehicle",
+            },
+            {
+                "documentFieldId": assignment_time_field_id,
+                "stringValue": _extract_assignment_time(assignment),
+            },
+        ]
+
+        payload: Dict[str, Any] = {
+            "documentTypeId": document_type_id,
+            "documentFields": document_fields,
+        }
+
+        driver_id = driver.get("id")
+        if driver_id:
+            payload["driverId"] = driver_id
+        vehicle_id = vehicle.get("id")
+        if vehicle_id:
+            payload["vehicleId"] = vehicle_id
+
+        try:
+            response = requests.post(
+                f"{base_url}/fleet/documents", headers=headers, json=payload, timeout=10
+            )
+            if 200 <= response.status_code < 300:
+                print(
+                    f"Created banned driver document for driver "
+                    f"{driver.get('name', 'Unknown driver')} "
+                    f"(status {response.status_code})."
+                )
+            else:
+                print(
+                    f"Failed to create banned driver document (status "
+                    f"{response.status_code}): {response.text}"
+                )
+        except requests.exceptions.RequestException as exc:
+            print(f"Error creating banned driver document: {exc}")
 
 
 def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
@@ -404,6 +488,14 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
         "urls": _parse_webhook_targets(secrets.get("BANNED_DRIVER_WEBHOOK_URLS")),
         "headers": webhook_headers,
         "timeout": timeout_value or 10,
+    }
+    document_config = {
+        "document_type_id": secrets.get("BANNED_DRIVER_DOCUMENT_TYPE_ID"),
+        "driver_name_field_id": secrets.get("BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID"),
+        "vehicle_name_field_id": secrets.get("BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID"),
+        "assignment_time_field_id": secrets.get(
+            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID"
+        ),
     }
 
     if not banned_tag_id:
@@ -452,6 +544,9 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
 
     if banned_assignments:
         _send_banned_driver_alert_webhooks(banned_assignments, hours, webhook_config)
+        _submit_banned_driver_documents(
+            banned_assignments, document_config, api_token, base_url
+        )
 
     return banned_assignments
 
