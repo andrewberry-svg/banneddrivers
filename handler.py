@@ -382,9 +382,9 @@ def _submit_banned_driver_documents(
     print(f"Starting document submission for {len(assignments)} banned driver assignment(s)...")
     
     document_type_id = document_config.get("document_type_id")
-    driver_field_id = document_config.get("driver_name_field_id")
-    vehicle_field_id = document_config.get("vehicle_name_field_id")
-    assignment_time_field_id = document_config.get("assignment_time_field_id")
+    driver_field_name = document_config.get("driver_name_field")
+    vehicle_field_name = document_config.get("vehicle_name_field")
+    assignment_time_field_name = document_config.get("assignment_time_field")
 
     if not document_type_id:
         print("ERROR: Banned driver document submission skipped - document type not configured.")
@@ -394,18 +394,18 @@ def _submit_banned_driver_documents(
     missing_fields = [
         field_name
         for field_name, value in {
-            "BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID": driver_field_id,
-            "BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID": vehicle_field_id,
-            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID": assignment_time_field_id,
+            "BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD": driver_field_name,
+            "BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD": vehicle_field_name,
+            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD": assignment_time_field_name,
         }.items()
         if not value
     ]
     if missing_fields:
         print(
-            "ERROR: Banned driver document submission skipped - missing field IDs: "
+            "ERROR: Banned driver document submission skipped - missing field names: "
             f"{', '.join(missing_fields)}."
         )
-        print("Please configure all required field IDs in your secrets.")
+        print("Please configure all required field names in your secrets.")
         return
 
     print(f"Document configuration validated. Submitting {len(assignments)} document(s)...")
@@ -421,15 +421,18 @@ def _submit_banned_driver_documents(
 
         document_fields: List[Dict[str, Any]] = [
             {
-                "documentFieldId": driver_field_id,
+                "label": driver_field_name,
+                "valueType": "String",
                 "stringValue": driver.get("name") or "Unknown driver",
             },
             {
-                "documentFieldId": vehicle_field_id,
+                "label": vehicle_field_name,
+                "valueType": "String",
                 "stringValue": vehicle.get("name") or "Unknown vehicle",
             },
             {
-                "documentFieldId": assignment_time_field_id,
+                "label": assignment_time_field_name,
+                "valueType": "String",
                 "stringValue": _extract_assignment_time(assignment),
             },
         ]
@@ -515,22 +518,20 @@ def list_document_types_and_fields():
             if fields:
                 print(f"\nFields ({len(fields)}):")
                 for field in fields:
-                    field_id = field.get("id")
                     field_label = field.get("label", "Unknown")
                     field_type = field.get("fieldType", "Unknown")
                     
                     print(f"  • {field_label}")
-                    print(f"    Field ID: {field_id}")
                     print(f"    Type: {field_type}")
                     
                     # Suggest which config key to use based on field name
                     lower_label = field_label.lower()
                     if "driver" in lower_label and "name" in lower_label:
-                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID")
+                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD = \"{field_label}\"")
                     elif "vehicle" in lower_label and "name" in lower_label:
-                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID")
+                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD = \"{field_label}\"")
                     elif "time" in lower_label or "date" in lower_label or "assignment" in lower_label:
-                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID")
+                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD = \"{field_label}\"")
                     print()
             else:
                 print("\n  No fields configured for this document type.")
@@ -541,10 +542,12 @@ def list_document_types_and_fields():
         print("\nTO CONFIGURE DOCUMENT SUBMISSION:")
         print("1. Choose a document type from above (or create one in Samsara)")
         print("2. Add these secrets to your Samsara function configuration:")
-        print("   - BANNED_DRIVER_DOCUMENT_TYPE_ID")
-        print("   - BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID")
-        print("   - BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID")
-        print("   - BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID")
+        print("   - BANNED_DRIVER_DOCUMENT_TYPE_ID = <document type ID>")
+        print("   - BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD = <field name for driver>")
+        print("   - BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD = <field name for vehicle>")
+        print("   - BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD = <field name for time>")
+        print("\nExample:")
+        print('   BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD = "Driver Name"')
         print("=" * 80)
         
     except requests.exceptions.RequestException as e:
@@ -590,10 +593,10 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     }
     document_config = {
         "document_type_id": secrets.get("BANNED_DRIVER_DOCUMENT_TYPE_ID"),
-        "driver_name_field_id": secrets.get("BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID"),
-        "vehicle_name_field_id": secrets.get("BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID"),
-        "assignment_time_field_id": secrets.get(
-            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID"
+        "driver_name_field": secrets.get("BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD"),
+        "vehicle_name_field": secrets.get("BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD"),
+        "assignment_time_field": secrets.get(
+            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD"
         ),
     }
 
