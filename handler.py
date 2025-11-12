@@ -375,6 +375,12 @@ def _submit_banned_driver_documents(
     api_token: str,
     base_url: str,
 ) -> None:
+    if not assignments:
+        print("Banned driver document submission skipped: no assignments to process.")
+        return
+
+    print(f"Attempting to submit documents for {len(assignments)} banned driver assignment(s).")
+
     document_type_id = document_config.get("document_type_id")
     driver_field_id = document_config.get("driver_name_field_id")
     vehicle_field_id = document_config.get("vehicle_name_field_id")
