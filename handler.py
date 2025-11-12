@@ -3,6 +3,7 @@ import json
 import requests
 import datetime
 from typing import Dict, List, Optional, Set, Any
+import os
 
 def make_api_request(api_token, method, url, params=None, headers=None, body=None):
     """
@@ -551,6 +552,187 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     return banned_assignments
 
 
+def send_notification(
+    assignments: List[Dict[str, Any]],
+    secrets: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Send notifications about banned driver assignments via configured channels.
+    
+    Supports multiple notification methods:
+    - Webhook: HTTP POST to a URL
+    - AWS SNS: Publish to an SNS topic
+    - Slack: Send to a Slack webhook URL
+    
+    Args:
+        assignments: List of banned driver assignments to notify about
+        secrets: Secrets dictionary containing notification configuration
+        
+    Returns:
+        Dictionary with notification results for each method attempted
+    """
+    if not assignments:
+        return {"status": "skipped", "reason": "no_assignments"}
+    
+    results = {}
+    
+    # Format the notification message
+    message_parts = [
+        f"⚠️ ALERT: {len(assignments)} banned driver assignment(s) detected in the last 2 hours:\n"
+    ]
+    
+    for i, assignment in enumerate(assignments, 1):
+        driver = assignment.get("driver", {})
+        vehicle = assignment.get("vehicle", {})
+        start_time = assignment.get("startTime", "N/A")
+        end_time = assignment.get("endTime", "N/A")
+        
+        message_parts.append(
+            f"{i}. Driver: {driver.get('name', 'N/A')} (ID: {driver.get('id', 'N/A')})\n"
+            f"   Vehicle: {vehicle.get('name', 'N/A')} (ID: {vehicle.get('id', 'N/A')})\n"
+            f"   Time: {start_time} to {end_time}\n"
+        )
+    
+    message = "\n".join(message_parts)
+    
+    # Prepare structured payload for webhooks
+    payload = {
+        "alert_type": "banned_driver_detected",
+        "count": len(assignments),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "assignments": [
+            {
+                "driver": {
+                    "id": a.get("driver", {}).get("id"),
+                    "name": a.get("driver", {}).get("name"),
+                },
+                "vehicle": {
+                    "id": a.get("vehicle", {}).get("id"),
+                    "name": a.get("vehicle", {}).get("name"),
+                },
+                "start_time": a.get("startTime"),
+                "end_time": a.get("endTime"),
+            }
+            for a in assignments
+        ],
+        "message": message,
+    }
+    
+    # 1. Webhook notification (generic HTTP POST)
+    webhook_url = secrets.get("NOTIFICATION_WEBHOOK_URL")
+    if webhook_url:
+        try:
+            response = requests.post(
+                webhook_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            results["webhook"] = {
+                "status": "success",
+                "status_code": response.status_code,
+            }
+        except Exception as e:
+            results["webhook"] = {
+                "status": "error",
+                "error": str(e),
+            }
+    
+    # 2. Slack webhook notification
+    slack_webhook_url = secrets.get("SLACK_WEBHOOK_URL")
+    if slack_webhook_url:
+        try:
+            slack_payload = {
+                "text": "🚨 Banned Driver Alert",
+                "blocks": [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "🚨 Banned Driver Alert",
+                        },
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": message,
+                        },
+                    },
+                ],
+            }
+            response = requests.post(
+                slack_webhook_url,
+                json=slack_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            results["slack"] = {
+                "status": "success",
+                "status_code": response.status_code,
+            }
+        except Exception as e:
+            results["slack"] = {
+                "status": "error",
+                "error": str(e),
+            }
+    
+    # 3. AWS SNS notification
+    sns_topic_arn = secrets.get("SNS_TOPIC_ARN")
+    if sns_topic_arn:
+        try:
+            # Only import boto3 if we're using SNS (it's available in Lambda)
+            if os.environ.get("AWS_EXECUTION_ENV"):
+                import boto3
+                sns_client = boto3.client("sns")
+                response = sns_client.publish(
+                    TopicArn=sns_topic_arn,
+                    Subject=f"Banned Driver Alert: {len(assignments)} assignment(s) detected",
+                    Message=message,
+                    MessageAttributes={
+                        "alert_type": {
+                            "DataType": "String",
+                            "StringValue": "banned_driver",
+                        },
+                        "count": {
+                            "DataType": "Number",
+                            "StringValue": str(len(assignments)),
+                        },
+                    },
+                )
+                results["sns"] = {
+                    "status": "success",
+                    "message_id": response.get("MessageId"),
+                }
+            else:
+                results["sns"] = {
+                    "status": "skipped",
+                    "reason": "not_running_in_aws",
+                }
+        except Exception as e:
+            results["sns"] = {
+                "status": "error",
+                "error": str(e),
+            }
+    
+    # 4. Email notification (via SMTP or SendGrid)
+    email_recipients = secrets.get("NOTIFICATION_EMAIL_RECIPIENTS")
+    if email_recipients:
+        # For now, we'll use a simple approach - you can enhance this with SendGrid, SES, etc.
+        results["email"] = {
+            "status": "not_implemented",
+            "note": "Email notification requires additional setup (SendGrid, AWS SES, etc.)",
+        }
+    
+    return {
+        "status": "completed",
+        "methods_attempted": list(results.keys()),
+        "results": results,
+    }
+
+
 def print_current_driver_vehicle_assignments():
     """
     For each vehicle, fetch current HOS driver-vehicle assignments and print the mapping.
@@ -718,13 +900,14 @@ def manage_assignments_and_signout_handler(event, context):
 def detect_banned_driver_assignments_handler(event, context):
     """
     Lambda handler wrapping detect_banned_driver_assignments.
+    Sends notifications if banned drivers are detected.
 
     Args:
         event: Invocation payload; supports optional 'hours' override.
         context: Lambda context (unused).
 
     Returns:
-        Response containing banned driver assignments within the window.
+        Response containing banned driver assignments within the window and notification results.
     """
     hours_override = None
     if isinstance(event, dict):
@@ -736,6 +919,13 @@ def detect_banned_driver_assignments_handler(event, context):
         lookback_hours = 2
 
     assignments = detect_banned_driver_assignments(hours=lookback_hours)
+    
+    # Send notifications if any banned drivers were detected
+    notification_result = None
+    if assignments:
+        function = samsara.Function()
+        secrets = function.secrets().load()
+        notification_result = send_notification(assignments, secrets)
 
     return {
         "statusCode": 200,
@@ -744,6 +934,7 @@ def detect_banned_driver_assignments_handler(event, context):
                 "hours": lookback_hours,
                 "count": len(assignments),
                 "assignments": assignments,
+                "notifications": notification_result,
             }
         ),
     }
@@ -761,7 +952,13 @@ if __name__ == "__main__":
                 hours_arg = int(sys.argv[2])
             except ValueError:
                 print(f"Invalid hours value '{sys.argv[2]}'. Defaulting to 2 hours.")
-        detect_banned_driver_assignments(hours=hours_arg)
+        assignments = detect_banned_driver_assignments(hours=hours_arg)
+        if assignments:
+            function = samsara.Function()
+            secrets = function.secrets().load()
+            notification_result = send_notification(assignments, secrets)
+            print("\nNotification Results:")
+            print(json.dumps(notification_result, indent=2))
     else:
         print("Usage:")
         print("  python handler.py assignments   # Print current driver-vehicle assignments")
