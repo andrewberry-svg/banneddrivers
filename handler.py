@@ -2,7 +2,6 @@ import samsara
 import json
 import requests
 import datetime
-import os
 from typing import Dict, List, Optional, Set, Any
 
 def make_api_request(api_token, method, url, params=None, headers=None, body=None):
@@ -195,25 +194,56 @@ def _fetch_recent_driver_vehicle_assignments(
     return data.get("data", [])
 
 
-def _parse_email_recipients(raw_value: Any) -> List[str]:
+def _parse_webhook_targets(raw_value: Any) -> List[str]:
     """
-    Normalize email recipient configuration into a list of addresses.
+    Normalize webhook destination configuration into a list of URLs.
 
-    Accepts comma- or semicolon-separated strings or iterables containing addresses.
+    Accepts comma-, semicolon-, or newline-separated strings or iterables containing URLs.
     """
     if raw_value is None:
         return []
 
-    recipients: List[str] = []
+    targets: List[str] = []
     if isinstance(raw_value, str):
-        normalized = raw_value.replace(";", ",")
-        recipients = [addr.strip() for addr in normalized.split(",")]
+        normalized = raw_value.replace(";", ",").replace("\n", ",")
+        targets = [url.strip() for url in normalized.split(",")]
     elif isinstance(raw_value, (list, tuple, set)):
-        recipients = [str(addr).strip() for addr in raw_value]
+        targets = [str(url).strip() for url in raw_value]
     else:
         return []
 
-    return [addr for addr in recipients if addr]
+    return [url for url in targets if url]
+
+
+def _parse_webhook_headers(raw_value: Any) -> Dict[str, str]:
+    """
+    Interpret webhook headers configuration as a dictionary of string key/value pairs.
+    """
+    if raw_value is None:
+        return {}
+
+    if isinstance(raw_value, dict):
+        return {str(k): str(v) for k, v in raw_value.items()}
+
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items()}
+        except json.JSONDecodeError:
+            pass
+
+        headers: Dict[str, str] = {}
+        for pair in raw_value.split(";"):
+            if not pair.strip():
+                continue
+            if ":" not in pair:
+                continue
+            key, value = pair.split(":", 1)
+            headers[key.strip()] = value.strip()
+        return headers
+
+    return {}
 
 
 def _format_iso_timestamp(value: str) -> str:
@@ -266,91 +296,163 @@ def _extract_assignment_time(assignment: Dict[str, Any]) -> str:
     return "Unknown"
 
 
-def _build_banned_driver_email_body(
+def _build_banned_driver_webhook_payload(
     assignments: List[Dict[str, Any]], lookback_hours: int
-) -> str:
-    lines = [
-        f"The system detected {len(assignments)} banned driver assignment(s) "
-        f"in the last {lookback_hours} hour(s).",
-        "",
-        "Assignments:",
+) -> Dict[str, Any]:
+    generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    payload: Dict[str, Any] = {
+        "event": "banned-driver-detected",
+        "generatedAt": generated_at,
+        "lookbackHours": lookback_hours,
+        "count": len(assignments),
+        "assignments": [],
+    }
+
+    events: List[Dict[str, Any]] = []
+    for assignment in assignments:
+        driver = assignment.get("driver") or {}
+        vehicle = assignment.get("vehicle") or {}
+        driver_entry = {
+            "id": driver.get("id"),
+            "name": driver.get("name"),
+            "externalIds": driver.get("externalIds"),
+        }
+        vehicle_entry = {
+            "id": vehicle.get("id"),
+            "name": vehicle.get("name"),
+            "externalIds": vehicle.get("externalIds"),
+        }
+        events.append(
+            {
+                "driver": driver_entry,
+                "vehicle": vehicle_entry,
+                "assignmentTime": _extract_assignment_time(assignment),
+                "rawAssignment": assignment,
+            }
+        )
+
+    payload["assignments"] = events
+    return payload
+
+
+def _send_banned_driver_alert_webhooks(
+    assignments: List[Dict[str, Any]],
+    lookback_hours: int,
+    webhook_config: Dict[str, Any],
+) -> None:
+    urls = webhook_config.get("urls") or []
+    if not urls:
+        return
+    if not assignments:
+        return
+
+    headers = webhook_config.get("headers") or {}
+    timeout = webhook_config.get("timeout") or 10
+    payload = _build_banned_driver_webhook_payload(assignments, lookback_hours)
+
+    for url in urls:
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if 200 <= response.status_code < 300:
+                print(
+                    f"Banned driver webhook delivered to {url} "
+                    f"(status {response.status_code})."
+                )
+            else:
+                print(
+                    f"Banned driver webhook to {url} returned status "
+                    f"{response.status_code}: {response.text}"
+                )
+        except requests.exceptions.RequestException as exc:
+            print(f"Failed to deliver banned driver webhook to {url}: {exc}")
+
+
+def _submit_banned_driver_documents(
+    assignments: List[Dict[str, Any]],
+    document_config: Dict[str, Any],
+    api_token: str,
+    base_url: str,
+) -> None:
+    document_type_id = document_config.get("document_type_id")
+    driver_field_id = document_config.get("driver_name_field_id")
+    vehicle_field_id = document_config.get("vehicle_name_field_id")
+    assignment_time_field_id = document_config.get("assignment_time_field_id")
+
+    if not document_type_id:
+        print("Banned driver document submission skipped: document type not configured.")
+        return
+
+    missing_fields = [
+        field_name
+        for field_name, value in {
+            "BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID": driver_field_id,
+            "BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID": vehicle_field_id,
+            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID": assignment_time_field_id,
+        }.items()
+        if not value
     ]
+    if missing_fields:
+        print(
+            "Banned driver document submission skipped: missing field IDs "
+            f"{', '.join(missing_fields)}."
+        )
+        return
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_token}",
+    }
 
     for assignment in assignments:
         driver = assignment.get("driver") or {}
         vehicle = assignment.get("vehicle") or {}
-        driver_name = driver.get("name", "Unknown driver")
-        driver_id = driver.get("id", "Unknown ID")
-        vehicle_name = vehicle.get("name", "Unknown vehicle")
-        vehicle_id = vehicle.get("id", "Unknown ID")
-        assignment_time = _extract_assignment_time(assignment)
 
-        lines.append(
-            f"- Driver: {driver_name} (ID: {driver_id}) | "
-            f"Vehicle: {vehicle_name} (ID: {vehicle_id}) | "
-            f"Assignment time: {assignment_time}"
-        )
-
-    lines.append("")
-    lines.append("This message was generated automatically.")
-    return "\n".join(lines)
-
-
-def _send_banned_driver_alert_email(
-    assignments: List[Dict[str, Any]],
-    lookback_hours: int,
-    email_config: Dict[str, Any],
-) -> None:
-    sender = email_config.get("sender")
-    recipients = email_config.get("recipients") or []
-    cc_recipients = email_config.get("cc") or []
-    bcc_recipients = email_config.get("bcc") or []
-    region = email_config.get("region")
-    subject = email_config.get("subject") or (
-        f"[Alert] Banned driver assignment detected ({len(assignments)})"
-    )
-
-    if not sender:
-        print("Banned driver alert email skipped: sender address not configured.")
-        return
-    if not recipients:
-        print("Banned driver alert email skipped: no recipients configured.")
-        return
-    if not assignments:
-        print("Banned driver alert email skipped: no assignments to report.")
-        return
-
-    body = _build_banned_driver_email_body(assignments, lookback_hours)
-
-    try:
-        import boto3
-        from botocore.exceptions import BotoCoreError, ClientError
-
-        client = boto3.client("ses", region_name=region)
-        destination: Dict[str, List[str]] = {"ToAddresses": recipients}
-        if cc_recipients:
-            destination["CcAddresses"] = cc_recipients
-        if bcc_recipients:
-            destination["BccAddresses"] = bcc_recipients
-
-        response = client.send_email(
-            Source=sender,
-            Destination=destination,
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
+        document_fields: List[Dict[str, Any]] = [
+            {
+                "documentFieldId": driver_field_id,
+                "stringValue": driver.get("name") or "Unknown driver",
             },
-            ReplyToAddresses=email_config.get("reply_to") or [],
-        )
-        message_id = response.get("MessageId", "unknown")
-        print(
-            "Banned driver alert email sent via SES "
-            f"(MessageId: {message_id}) to {', '.join(recipients)}."
-        )
-    except (BotoCoreError, ClientError) as exc:
-        print(f"Failed to send banned driver alert email via SES: {exc}")
-    except Exception as exc:  # pragma: no cover - safeguard for unexpected errors
-        print(f"Unexpected error sending banned driver alert email: {exc}")
+            {
+                "documentFieldId": vehicle_field_id,
+                "stringValue": vehicle.get("name") or "Unknown vehicle",
+            },
+            {
+                "documentFieldId": assignment_time_field_id,
+                "stringValue": _extract_assignment_time(assignment),
+            },
+        ]
+
+        payload: Dict[str, Any] = {
+            "documentTypeId": document_type_id,
+            "documentFields": document_fields,
+        }
+
+        driver_id = driver.get("id")
+        if driver_id:
+            payload["driverId"] = driver_id
+        vehicle_id = vehicle.get("id")
+        if vehicle_id:
+            payload["vehicleId"] = vehicle_id
+
+        try:
+            response = requests.post(
+                f"{base_url}/fleet/documents", headers=headers, json=payload, timeout=10
+            )
+            if 200 <= response.status_code < 300:
+                print(
+                    f"Created banned driver document for driver "
+                    f"{driver.get('name', 'Unknown driver')} "
+                    f"(status {response.status_code})."
+                )
+            else:
+                print(
+                    f"Failed to create banned driver document (status "
+                    f"{response.status_code}): {response.text}"
+                )
+        except requests.exceptions.RequestException as exc:
+            print(f"Error creating banned driver document: {exc}")
 
 
 def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
@@ -369,18 +471,31 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     base_url = secrets.get("SAMSARA_BASE_URL", "https://api.eu.samsara.com")
     banned_tag_id = secrets.get("BANNED_DRIVER_TAG_ID")
     banned_tag_name = secrets.get("BANNED_DRIVER_TAG_NAME")
-    email_config = {
-        "sender": secrets.get("BANNED_DRIVER_ALERT_SENDER"),
-        "recipients": _parse_email_recipients(
-            secrets.get("BANNED_DRIVER_ALERT_RECIPIENTS")
+    webhook_headers = _parse_webhook_headers(secrets.get("BANNED_DRIVER_WEBHOOK_HEADERS"))
+    shared_secret = secrets.get("BANNED_DRIVER_WEBHOOK_SHARED_SECRET")
+    if shared_secret and "X-Webhook-Token" not in webhook_headers:
+        webhook_headers["X-Webhook-Token"] = str(shared_secret)
+
+    webhook_timeout = secrets.get("BANNED_DRIVER_WEBHOOK_TIMEOUT_SECONDS")
+    try:
+        timeout_value: Optional[float] = (
+            float(webhook_timeout) if webhook_timeout is not None else None
+        )
+    except (TypeError, ValueError):
+        timeout_value = None
+
+    webhook_config = {
+        "urls": _parse_webhook_targets(secrets.get("BANNED_DRIVER_WEBHOOK_URLS")),
+        "headers": webhook_headers,
+        "timeout": timeout_value or 10,
+    }
+    document_config = {
+        "document_type_id": secrets.get("BANNED_DRIVER_DOCUMENT_TYPE_ID"),
+        "driver_name_field_id": secrets.get("BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID"),
+        "vehicle_name_field_id": secrets.get("BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID"),
+        "assignment_time_field_id": secrets.get(
+            "BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID"
         ),
-        "cc": _parse_email_recipients(secrets.get("BANNED_DRIVER_ALERT_CC")),
-        "bcc": _parse_email_recipients(secrets.get("BANNED_DRIVER_ALERT_BCC")),
-        "reply_to": _parse_email_recipients(secrets.get("BANNED_DRIVER_ALERT_REPLY_TO")),
-        "subject": secrets.get("BANNED_DRIVER_ALERT_SUBJECT"),
-        "region": secrets.get("BANNED_DRIVER_ALERT_REGION")
-        or os.environ.get("AWS_REGION")
-        or os.environ.get("AWS_DEFAULT_REGION"),
     }
 
     if not banned_tag_id:
@@ -428,7 +543,10 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
         )
 
     if banned_assignments:
-        _send_banned_driver_alert_email(banned_assignments, hours, email_config)
+        _send_banned_driver_alert_webhooks(banned_assignments, hours, webhook_config)
+        _submit_banned_driver_documents(
+            banned_assignments, document_config, api_token, base_url
+        )
 
     return banned_assignments
 
