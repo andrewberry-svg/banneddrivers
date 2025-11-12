@@ -467,6 +467,93 @@ def _submit_banned_driver_documents(
     print(f"Completed document submission process for {len(assignments)} assignment(s).")
 
 
+def list_document_types_and_fields():
+    """
+    List all available document types and their fields to help configure document submission.
+    
+    Run this function to discover the document type IDs and field IDs needed for
+    banned driver document submission configuration.
+    """
+    function = samsara.Function()
+    secrets = function.secrets().load()
+    api_token = secrets["SAMSARA_API"]
+    base_url = secrets.get("SAMSARA_BASE_URL", "https://api.eu.samsara.com")
+    
+    print("=" * 80)
+    print("SAMSARA DOCUMENT TYPES AND FIELDS")
+    print("=" * 80)
+    
+    try:
+        # Fetch all document types
+        response = make_api_request(
+            api_token=api_token,
+            method="GET",
+            url=f"{base_url}/fleet/document-types",
+            params={"limit": 512}
+        )
+        data = response.json()
+        document_types = data.get("data", [])
+        
+        if not document_types:
+            print("\nNo document types found in your Samsara organization.")
+            print("You'll need to create a custom document type in Samsara first.")
+            return
+        
+        print(f"\nFound {len(document_types)} document type(s):\n")
+        
+        for doc_type in document_types:
+            doc_type_id = doc_type.get("id")
+            doc_type_name = doc_type.get("name", "Unknown")
+            
+            print("-" * 80)
+            print(f"Document Type: {doc_type_name}")
+            print(f"Document Type ID: {doc_type_id}")
+            print(f"  └─ Use this for: BANNED_DRIVER_DOCUMENT_TYPE_ID")
+            
+            # Get fields for this document type
+            fields = doc_type.get("documentFields", [])
+            if fields:
+                print(f"\nFields ({len(fields)}):")
+                for field in fields:
+                    field_id = field.get("id")
+                    field_label = field.get("label", "Unknown")
+                    field_type = field.get("fieldType", "Unknown")
+                    
+                    print(f"  • {field_label}")
+                    print(f"    Field ID: {field_id}")
+                    print(f"    Type: {field_type}")
+                    
+                    # Suggest which config key to use based on field name
+                    lower_label = field_label.lower()
+                    if "driver" in lower_label and "name" in lower_label:
+                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID")
+                    elif "vehicle" in lower_label and "name" in lower_label:
+                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID")
+                    elif "time" in lower_label or "date" in lower_label or "assignment" in lower_label:
+                        print(f"    └─ Suggested for: BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID")
+                    print()
+            else:
+                print("\n  No fields configured for this document type.")
+            
+            print()
+        
+        print("=" * 80)
+        print("\nTO CONFIGURE DOCUMENT SUBMISSION:")
+        print("1. Choose a document type from above (or create one in Samsara)")
+        print("2. Add these secrets to your Samsara function configuration:")
+        print("   - BANNED_DRIVER_DOCUMENT_TYPE_ID")
+        print("   - BANNED_DRIVER_DOCUMENT_DRIVER_NAME_FIELD_ID")
+        print("   - BANNED_DRIVER_DOCUMENT_VEHICLE_NAME_FIELD_ID")
+        print("   - BANNED_DRIVER_DOCUMENT_ASSIGNMENT_TIME_FIELD_ID")
+        print("=" * 80)
+        
+    except requests.exceptions.RequestException as e:
+        print(f"\nError fetching document types: {e}")
+        print("\nMake sure:")
+        print("  - Your SAMSARA_API token has the correct permissions")
+        print("  - The SAMSARA_BASE_URL is correct for your region")
+
+
 def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     """
     Detect assignments where banned drivers were operating vehicles within the given window.
@@ -774,8 +861,11 @@ if __name__ == "__main__":
             except ValueError:
                 print(f"Invalid hours value '{sys.argv[2]}'. Defaulting to 2 hours.")
         detect_banned_driver_assignments(hours=hours_arg)
+    elif len(sys.argv) > 1 and sys.argv[1] == "list-document-types":
+        list_document_types_and_fields()
     else:
         print("Usage:")
-        print("  python handler.py assignments   # Print current driver-vehicle assignments")
-        print("  python handler.py signout       # Sign out all currently assigned drivers")
-        print("  python handler.py detect-banned [hours]  # Detect banned driver assignments within the past N hours")
+        print("  python handler.py assignments           # Print current driver-vehicle assignments")
+        print("  python handler.py signout               # Sign out all currently assigned drivers")
+        print("  python handler.py detect-banned [hours] # Detect banned driver assignments within the past N hours")
+        print("  python handler.py list-document-types   # List all document types and their field IDs")
