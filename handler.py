@@ -2,6 +2,7 @@ import samsara
 import json
 import requests
 import datetime
+import os
 from typing import Dict, List, Optional, Set, Any
 
 def make_api_request(api_token, method, url, params=None, headers=None, body=None):
@@ -194,6 +195,164 @@ def _fetch_recent_driver_vehicle_assignments(
     return data.get("data", [])
 
 
+def _parse_email_recipients(raw_value: Any) -> List[str]:
+    """
+    Normalize email recipient configuration into a list of addresses.
+
+    Accepts comma- or semicolon-separated strings or iterables containing addresses.
+    """
+    if raw_value is None:
+        return []
+
+    recipients: List[str] = []
+    if isinstance(raw_value, str):
+        normalized = raw_value.replace(";", ",")
+        recipients = [addr.strip() for addr in normalized.split(",")]
+    elif isinstance(raw_value, (list, tuple, set)):
+        recipients = [str(addr).strip() for addr in raw_value]
+    else:
+        return []
+
+    return [addr for addr in recipients if addr]
+
+
+def _format_iso_timestamp(value: str) -> str:
+    """Return a human-friendly UTC timestamp when possible."""
+    try:
+        cleaned_value = value
+        if cleaned_value.endswith("Z"):
+            cleaned_value = cleaned_value[:-1] + "+00:00"
+        dt = datetime.datetime.fromisoformat(cleaned_value)
+        if dt.tzinfo is None:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+    except ValueError:
+        return value
+
+
+def _extract_assignment_time(assignment: Dict[str, Any]) -> str:
+    """
+    Find the most relevant timestamp associated with an assignment.
+
+    Samsara assignments may expose several potential timestamp fields,
+    so we probe a collection of common keys and fall back gracefully.
+    """
+    candidate_fields = [
+        "startTime",
+        "signedInAt",
+        "assignmentStartTime",
+        "createdAt",
+        "occurredAt",
+        "timestamp",
+        "eventTime",
+        "updatedAt",
+    ]
+    for field in candidate_fields:
+        value = assignment.get(field)
+        if isinstance(value, str) and value:
+            return _format_iso_timestamp(value)
+        if isinstance(value, dict):
+            nested_time = value.get("time") or value.get("timestamp")
+            if isinstance(nested_time, str) and nested_time:
+                return _format_iso_timestamp(nested_time)
+
+    active_interval = assignment.get("activeInterval")
+    if isinstance(active_interval, dict):
+        for nested_field in ("startTime", "start", "beganAt"):
+            nested_value = active_interval.get(nested_field)
+            if isinstance(nested_value, str) and nested_value:
+                return _format_iso_timestamp(nested_value)
+
+    return "Unknown"
+
+
+def _build_banned_driver_email_body(
+    assignments: List[Dict[str, Any]], lookback_hours: int
+) -> str:
+    lines = [
+        f"The system detected {len(assignments)} banned driver assignment(s) "
+        f"in the last {lookback_hours} hour(s).",
+        "",
+        "Assignments:",
+    ]
+
+    for assignment in assignments:
+        driver = assignment.get("driver") or {}
+        vehicle = assignment.get("vehicle") or {}
+        driver_name = driver.get("name", "Unknown driver")
+        driver_id = driver.get("id", "Unknown ID")
+        vehicle_name = vehicle.get("name", "Unknown vehicle")
+        vehicle_id = vehicle.get("id", "Unknown ID")
+        assignment_time = _extract_assignment_time(assignment)
+
+        lines.append(
+            f"- Driver: {driver_name} (ID: {driver_id}) | "
+            f"Vehicle: {vehicle_name} (ID: {vehicle_id}) | "
+            f"Assignment time: {assignment_time}"
+        )
+
+    lines.append("")
+    lines.append("This message was generated automatically.")
+    return "\n".join(lines)
+
+
+def _send_banned_driver_alert_email(
+    assignments: List[Dict[str, Any]],
+    lookback_hours: int,
+    email_config: Dict[str, Any],
+) -> None:
+    sender = email_config.get("sender")
+    recipients = email_config.get("recipients") or []
+    cc_recipients = email_config.get("cc") or []
+    bcc_recipients = email_config.get("bcc") or []
+    region = email_config.get("region")
+    subject = email_config.get("subject") or (
+        f"[Alert] Banned driver assignment detected ({len(assignments)})"
+    )
+
+    if not sender:
+        print("Banned driver alert email skipped: sender address not configured.")
+        return
+    if not recipients:
+        print("Banned driver alert email skipped: no recipients configured.")
+        return
+    if not assignments:
+        print("Banned driver alert email skipped: no assignments to report.")
+        return
+
+    body = _build_banned_driver_email_body(assignments, lookback_hours)
+
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        client = boto3.client("ses", region_name=region)
+        destination: Dict[str, List[str]] = {"ToAddresses": recipients}
+        if cc_recipients:
+            destination["CcAddresses"] = cc_recipients
+        if bcc_recipients:
+            destination["BccAddresses"] = bcc_recipients
+
+        response = client.send_email(
+            Source=sender,
+            Destination=destination,
+            Message={
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
+            },
+            ReplyToAddresses=email_config.get("reply_to") or [],
+        )
+        message_id = response.get("MessageId", "unknown")
+        print(
+            "Banned driver alert email sent via SES "
+            f"(MessageId: {message_id}) to {', '.join(recipients)}."
+        )
+    except (BotoCoreError, ClientError) as exc:
+        print(f"Failed to send banned driver alert email via SES: {exc}")
+    except Exception as exc:  # pragma: no cover - safeguard for unexpected errors
+        print(f"Unexpected error sending banned driver alert email: {exc}")
+
+
 def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     """
     Detect assignments where banned drivers were operating vehicles within the given window.
@@ -210,6 +369,19 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     base_url = secrets.get("SAMSARA_BASE_URL", "https://api.eu.samsara.com")
     banned_tag_id = secrets.get("BANNED_DRIVER_TAG_ID")
     banned_tag_name = secrets.get("BANNED_DRIVER_TAG_NAME")
+    email_config = {
+        "sender": secrets.get("BANNED_DRIVER_ALERT_SENDER"),
+        "recipients": _parse_email_recipients(
+            secrets.get("BANNED_DRIVER_ALERT_RECIPIENTS")
+        ),
+        "cc": _parse_email_recipients(secrets.get("BANNED_DRIVER_ALERT_CC")),
+        "bcc": _parse_email_recipients(secrets.get("BANNED_DRIVER_ALERT_BCC")),
+        "reply_to": _parse_email_recipients(secrets.get("BANNED_DRIVER_ALERT_REPLY_TO")),
+        "subject": secrets.get("BANNED_DRIVER_ALERT_SUBJECT"),
+        "region": secrets.get("BANNED_DRIVER_ALERT_REGION")
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION"),
+    }
 
     if not banned_tag_id:
         if not banned_tag_name:
@@ -254,6 +426,9 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
             f"was assigned to Vehicle {vehicle.get('name', 'N/A')} "
             f"(ID: {vehicle.get('id', 'N/A')})"
         )
+
+    if banned_assignments:
+        _send_banned_driver_alert_email(banned_assignments, hours, email_config)
 
     return banned_assignments
 
