@@ -376,7 +376,10 @@ def _submit_banned_driver_documents(
     base_url: str,
 ) -> None:
     if not assignments:
+        print("Document submission skipped: no assignments to process.")
         return
+    
+    print(f"Starting document submission for {len(assignments)} banned driver assignment(s)...")
     
     document_type_id = document_config.get("document_type_id")
     driver_field_id = document_config.get("driver_name_field_id")
@@ -384,7 +387,8 @@ def _submit_banned_driver_documents(
     assignment_time_field_id = document_config.get("assignment_time_field_id")
 
     if not document_type_id:
-        print("Banned driver document submission skipped: document type not configured.")
+        print("ERROR: Banned driver document submission skipped - document type not configured.")
+        print("Please set BANNED_DRIVER_DOCUMENT_TYPE_ID in your secrets configuration.")
         return
 
     missing_fields = [
@@ -398,11 +402,14 @@ def _submit_banned_driver_documents(
     ]
     if missing_fields:
         print(
-            "Banned driver document submission skipped: missing field IDs "
+            "ERROR: Banned driver document submission skipped - missing field IDs: "
             f"{', '.join(missing_fields)}."
         )
+        print("Please configure all required field IDs in your secrets.")
         return
 
+    print(f"Document configuration validated. Submitting {len(assignments)} document(s)...")
+    
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_token}",
@@ -456,6 +463,8 @@ def _submit_banned_driver_documents(
                 )
         except requests.exceptions.RequestException as exc:
             print(f"Error creating banned driver document: {exc}")
+    
+    print(f"Completed document submission process for {len(assignments)} assignment(s).")
 
 
 def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
