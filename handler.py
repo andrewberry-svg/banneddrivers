@@ -375,6 +375,9 @@ def _submit_banned_driver_documents(
     api_token: str,
     base_url: str,
 ) -> None:
+    if not assignments:
+        return
+    
     document_type_id = document_config.get("document_type_id")
     driver_field_id = document_config.get("driver_name_field_id")
     vehicle_field_id = document_config.get("vehicle_name_field_id")
@@ -405,6 +408,8 @@ def _submit_banned_driver_documents(
         "Authorization": f"Bearer {api_token}",
     }
 
+    print(f"Submitting banned driver documents for {len(assignments)} assignment(s).")
+    
     for assignment in assignments:
         driver = assignment.get("driver") or {}
         vehicle = assignment.get("vehicle") or {}
@@ -440,19 +445,21 @@ def _submit_banned_driver_documents(
             response = requests.post(
                 f"{base_url}/fleet/documents", headers=headers, json=payload, timeout=10
             )
-            if 200 <= response.status_code < 300:
-                print(
-                    f"Created banned driver document for driver "
-                    f"{driver.get('name', 'Unknown driver')} "
-                    f"(status {response.status_code})."
-                )
-            else:
-                print(
-                    f"Failed to create banned driver document (status "
-                    f"{response.status_code}): {response.text}"
-                )
+            response.raise_for_status()  # Raise an exception for bad status codes
+            print(
+                f"Created banned driver document for driver "
+                f"{driver.get('name', 'Unknown driver')} "
+                f"(status {response.status_code})."
+            )
+        except requests.exceptions.HTTPError as exc:
+            print(
+                f"Failed to create banned driver document for driver "
+                f"{driver.get('name', 'Unknown driver')} (HTTP {exc.response.status_code}): "
+                f"{exc.response.text if exc.response else str(exc)}"
+            )
         except requests.exceptions.RequestException as exc:
-            print(f"Error creating banned driver document: {exc}")
+            print(f"Error creating banned driver document for driver "
+                  f"{driver.get('name', 'Unknown driver')}: {exc}")
 
 
 def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
