@@ -447,10 +447,22 @@ def manage_assignments_and_signout_handler(event, context):
     signout_result = signout_output.getvalue()
     sys.stdout = sys_stdout
 
+    banned_output = io.StringIO()
+    sys.stdout = banned_output
+    banned_assignments, email_status = detect_banned_driver_assignments()
+    banned_result = banned_output.getvalue()
+    sys.stdout = sys_stdout
+
     return {
         "statusCode": 200,
         "body": json.dumps(
-            {"assignments": assignments_result, "signout": signout_result}
+            {
+                "assignments": assignments_result,
+                "signout": signout_result,
+                "bannedAssignments": banned_assignments,
+                "bannedAssignmentsLog": banned_result,
+                "emailStatus": email_status,
+            }
         ),
     }
 
