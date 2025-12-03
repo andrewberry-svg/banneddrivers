@@ -1,6 +1,6 @@
 import json
 import datetime
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Set, Any, Tuple
 
 import requests
 import samsara
@@ -150,16 +150,24 @@ def _fetch_recent_driver_vehicle_assignments(
     return data.get("data", [])
 
 
-def _send_mailgun_notification(assignments: List[Dict[str, Any]], secrets: Dict[str, Any]) -> None:
+def _send_mailgun_notification(assignments: List[Dict[str, Any]], secrets: Dict[str, Any]) -> Dict[str, Any]:
     """Send a summary email via Mailgun when banned assignments are found."""
 
     api_key = secrets.get("MAILGUN_API_KEY")
     domain = secrets.get("MAILGUN_DOMAIN")
     recipients_raw = secrets.get("MAILGUN_RECIPIENTS")
 
+    status: Dict[str, Any] = {
+        "sent": False,
+        "recipients": [],
+        "reason": None,
+    }
+
     if not api_key or not domain or not recipients_raw:
-        print("Mailgun not fully configured; skipping notification email.")
-        return
+        reason = "missing Mailgun configuration values"
+        print(f"Mailgun not fully configured; skipping notification email ({reason}).")
+        status["reason"] = reason
+        return status
 
     if isinstance(recipients_raw, str):
         recipients = [addr.strip() for addr in recipients_raw.split(",") if addr.strip()]
@@ -169,8 +177,10 @@ def _send_mailgun_notification(assignments: List[Dict[str, Any]], secrets: Dict[
         recipients = []
 
     if not recipients:
+        reason = "no valid Mailgun recipients configured"
         print("No valid Mailgun recipients configured; skipping notification email.")
-        return
+        status["reason"] = reason
+        return status
 
     from_email = secrets.get("MAILGUN_FROM_EMAIL") or f"alerts@{domain}"
     subject = secrets.get("MAILGUN_SUBJECT") or "Banned driver assignments detected"
@@ -205,17 +215,35 @@ def _send_mailgun_notification(assignments: List[Dict[str, Any]], secrets: Dict[
         )
         response.raise_for_status()
         print(f"Mailgun notification sent to {', '.join(recipients)}")
+        status["sent"] = True
+        status["recipients"] = recipients
+        status["reason"] = "email sent successfully"
     except requests.RequestException as exc:
+        reason = f"Mailgun request failed: {exc}"
         print(f"Failed to send Mailgun notification: {exc}")
+        status["reason"] = reason
+
+    return status
 
 
-def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
+def detect_banned_driver_assignments(hours: int = 2) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Detect assignments where banned drivers were operating vehicles within the given window.
+
+    Returns:
+        Tuple of (assignments list, email status dict summarizing Mailgun delivery attempt).
+    """
     function = samsara.Function()
     secrets = function.secrets().load()
     api_token = secrets["SAMSARA_API"]
     base_url = secrets.get("SAMSARA_BASE_URL", "https://api.eu.samsara.com")
     banned_tag_id = secrets.get("BANNED_DRIVER_TAG_ID")
     banned_tag_name = secrets.get("BANNED_DRIVER_TAG_NAME")
+    email_status: Dict[str, Any] = {
+        "sent": False,
+        "recipients": [],
+        "reason": "email not attempted",
+    }
 
     if not banned_tag_id:
         if not banned_tag_name:
@@ -231,7 +259,8 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     banned_driver_ids = _fetch_driver_ids_by_tag(api_token, base_url, str(banned_tag_id))
     if not banned_driver_ids:
         print("No drivers found for the banned drivers tag.")
-        return []
+        email_status["reason"] = "no drivers found for banned tag"
+        return [], email_status
 
     end_time = datetime.datetime.now(datetime.timezone.utc)
     start_time = end_time - datetime.timedelta(hours=hours)
@@ -243,6 +272,7 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
     )
 
     banned_assignments: List[Dict[str, Any]] = []
+    email_status["reason"] = "no banned assignments detected"
     for assignment in assignments:
         driver = assignment.get("driver") or {}
         driver_id = driver.get("id")
@@ -262,9 +292,9 @@ def detect_banned_driver_assignments(hours: int = 2) -> List[Dict[str, Any]]:
         )
 
     if banned_assignments:
-        _send_mailgun_notification(banned_assignments, secrets)
+        email_status = _send_mailgun_notification(banned_assignments, secrets)
 
-    return banned_assignments
+    return banned_assignments, email_status
 
 
 def print_current_driver_vehicle_assignments():
@@ -435,7 +465,7 @@ def detect_banned_driver_assignments_handler(event, context):
     else:
         lookback_hours = 2
 
-    assignments = detect_banned_driver_assignments(hours=lookback_hours)
+    assignments, email_status = detect_banned_driver_assignments(hours=lookback_hours)
 
     return {
         "statusCode": 200,
@@ -444,6 +474,7 @@ def detect_banned_driver_assignments_handler(event, context):
                 "hours": lookback_hours,
                 "count": len(assignments),
                 "assignments": assignments,
+                "emailStatus": email_status,
             }
         ),
     }
@@ -465,7 +496,12 @@ if __name__ == "__main__":
                 print(
                     f"Invalid hours value '{sys.argv[2]}'. Defaulting to 2 hours."
                 )
-        detect_banned_driver_assignments(hours=hours_arg)
+        assignments, email_status = detect_banned_driver_assignments(hours=hours_arg)
+        print(
+            f"Email notification sent: {email_status.get('sent')} | "
+            f"recipients: {', '.join(email_status.get('recipients', [])) or 'N/A'} | "
+            f"reason: {email_status.get('reason')}"
+        )
     else:
         print("Usage:")
         print("  python handler.py assignments   # Print current driver-vehicle assignments")
