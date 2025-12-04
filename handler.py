@@ -449,9 +449,36 @@ def manage_assignments_and_signout_handler(event, context):
 
     banned_output = io.StringIO()
     sys.stdout = banned_output
-    banned_assignments, email_status = detect_banned_driver_assignments()
-    banned_result = banned_output.getvalue()
-    sys.stdout = sys_stdout
+    banned_assignments: List[Dict[str, Any]] = []
+    email_status: Dict[str, Any] = {
+        "sent": False,
+        "recipients": [],
+        "reason": "banned driver detection not attempted",
+    }
+    try:
+        banned_assignments, email_status = detect_banned_driver_assignments()
+    except requests.HTTPError as exc:
+        status_code = getattr(exc.response, "status_code", "unknown")
+        response_text = getattr(exc.response, "text", "no response body")
+        print(
+            "detect_banned_driver_assignments failed "
+            f"(status={status_code}): {response_text}"
+        )
+        email_status = {
+            "sent": False,
+            "recipients": [],
+            "reason": f"failed with HTTP {status_code}",
+        }
+    except Exception as exc:  # Catch-all to keep handler healthy
+        print(f"detect_banned_driver_assignments encountered an error: {exc}")
+        email_status = {
+            "sent": False,
+            "recipients": [],
+            "reason": f"unexpected error: {exc}",
+        }
+    finally:
+        banned_result = banned_output.getvalue()
+        sys.stdout = sys_stdout
 
     return {
         "statusCode": 200,
