@@ -1,9 +1,26 @@
 import json
 import datetime
+import io
 from typing import Dict, List, Optional, Set, Any, Tuple
 
 import requests
 import samsara
+class _TeeIO:
+    """Duplicate writes to multiple streams (used to log and capture simultaneously)."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            if hasattr(stream, "flush"):
+                stream.flush()
+
 
 
 def make_api_request(api_token, method, url, params=None, headers=None, body=None):
