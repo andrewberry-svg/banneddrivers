@@ -1,28 +1,11 @@
 import json
 import datetime
 import io
+from contextlib import redirect_stdout
 from typing import Dict, List, Optional, Set, Any, Tuple
 
 import requests
 import samsara
-class _TeeIO:
-    """Duplicate writes to multiple streams (used to log and capture simultaneously)."""
-
-    def __init__(self, *streams):
-        self._streams = streams
-
-    def write(self, data: str) -> int:
-        for stream in self._streams:
-            stream.write(data)
-        return len(data)
-
-    def flush(self) -> None:
-        for stream in self._streams:
-            if hasattr(stream, "flush"):
-                stream.flush()
-
-
-
 def make_api_request(api_token, method, url, params=None, headers=None, body=None):
     """
     Helper function to make REST API calls with support for different HTTP methods and pagination.
@@ -448,28 +431,21 @@ def signout_currently_assigned_drivers():
 
 
 def manage_assignments_and_signout_handler(event, context):
-    import sys
-
-    sys_stdout = sys.stdout
-
     assignments_output = io.StringIO()
-    sys.stdout = _TeeIO(sys_stdout, assignments_output)
-    try:
+    with redirect_stdout(assignments_output):
         print_current_driver_vehicle_assignments()
-    finally:
-        sys.stdout = sys_stdout
     assignments_result = assignments_output.getvalue()
+    if assignments_result:
+        print(assignments_result, end="")
 
     signout_output = io.StringIO()
-    sys.stdout = _TeeIO(sys_stdout, signout_output)
-    try:
+    with redirect_stdout(signout_output):
         signout_currently_assigned_drivers()
-    finally:
-        sys.stdout = sys_stdout
     signout_result = signout_output.getvalue()
+    if signout_result:
+        print(signout_result, end="")
 
     banned_output = io.StringIO()
-    sys.stdout = _TeeIO(sys_stdout, banned_output)
     banned_assignments: List[Dict[str, Any]] = []
     email_status: Dict[str, Any] = {
         "sent": False,
@@ -477,7 +453,8 @@ def manage_assignments_and_signout_handler(event, context):
         "reason": "banned driver detection not attempted",
     }
     try:
-        banned_assignments, email_status = detect_banned_driver_assignments()
+        with redirect_stdout(banned_output):
+            banned_assignments, email_status = detect_banned_driver_assignments()
     except requests.HTTPError as exc:
         status_code = getattr(exc.response, "status_code", "unknown")
         response_text = getattr(exc.response, "text", "no response body")
@@ -497,9 +474,9 @@ def manage_assignments_and_signout_handler(event, context):
             "recipients": [],
             "reason": f"unexpected error: {exc}",
         }
-    finally:
-        sys.stdout = sys_stdout
     banned_result = banned_output.getvalue()
+    if banned_result:
+        print(banned_result, end="")
 
     return {
         "statusCode": 200,
