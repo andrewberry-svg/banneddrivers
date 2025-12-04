@@ -448,24 +448,28 @@ def signout_currently_assigned_drivers():
 
 
 def manage_assignments_and_signout_handler(event, context):
-    import io
     import sys
 
-    assignments_output = io.StringIO()
     sys_stdout = sys.stdout
-    sys.stdout = assignments_output
-    print_current_driver_vehicle_assignments()
+
+    assignments_output = io.StringIO()
+    sys.stdout = _TeeIO(sys_stdout, assignments_output)
+    try:
+        print_current_driver_vehicle_assignments()
+    finally:
+        sys.stdout = sys_stdout
     assignments_result = assignments_output.getvalue()
-    sys.stdout = sys_stdout
 
     signout_output = io.StringIO()
-    sys.stdout = signout_output
-    signout_currently_assigned_drivers()
+    sys.stdout = _TeeIO(sys_stdout, signout_output)
+    try:
+        signout_currently_assigned_drivers()
+    finally:
+        sys.stdout = sys_stdout
     signout_result = signout_output.getvalue()
-    sys.stdout = sys_stdout
 
     banned_output = io.StringIO()
-    sys.stdout = banned_output
+    sys.stdout = _TeeIO(sys_stdout, banned_output)
     banned_assignments: List[Dict[str, Any]] = []
     email_status: Dict[str, Any] = {
         "sent": False,
@@ -494,8 +498,8 @@ def manage_assignments_and_signout_handler(event, context):
             "reason": f"unexpected error: {exc}",
         }
     finally:
-        banned_result = banned_output.getvalue()
         sys.stdout = sys_stdout
+    banned_result = banned_output.getvalue()
 
     return {
         "statusCode": 200,
